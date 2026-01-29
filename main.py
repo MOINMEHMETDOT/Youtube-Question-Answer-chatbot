@@ -39,6 +39,8 @@ def ask(req: QuestionRequest):
         raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
 
 @app.get("/health")
+def health():
+    return {"status": "healthy", "video_loaded": rag_chain is not None}
 
 if __name__ == "__main__":
     import os
@@ -50,7 +52,3 @@ if __name__ == "__main__":
         port=port,
         log_level="info"
     )
-
-def health():
-    return {"status": "healthy", "video_loaded": rag_chain is not None}
-
