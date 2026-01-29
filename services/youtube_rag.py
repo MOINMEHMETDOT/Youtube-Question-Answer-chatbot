@@ -1,4 +1,9 @@
-from youtube_transcript_api import YouTubeTranscriptApi
+import os
+import yt_dlp
+import requests
+from urllib.parse import urlparse, parse_qs
+from dotenv import load_dotenv
+
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.vectorstores import FAISS
@@ -6,9 +11,6 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnableParallel, RunnablePassthrough, RunnableLambda
-from urllib.parse import urlparse, parse_qs
-import os
-from dotenv import load_dotenv
 
 load_dotenv()
 
@@ -32,30 +34,58 @@ def format_docs(docs):
     return "\n\n".join(doc.page_content for doc in docs)
 
 
+# ---------------- Transcript via yt-dlp ----------------
+def get_transcript_with_ytdlp(video_id: str) -> str:
+    ydl_opts = {
+        "skip_download": True,
+        "writesubtitles": True,
+        "writeautomaticsub": True,
+        "quiet": True,
+    }
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(
+            f"https://www.youtube.com/watch?v={video_id}",
+            download=False
+        )
+
+    subtitles = info.get("subtitles") or info.get("automatic_captions")
+    if not subtitles or "en" not in subtitles:
+        raise RuntimeError("No English subtitles available")
+
+    subtitle_url = subtitles["en"][0]["url"]
+    response = requests.get(subtitle_url)
+    response.raise_for_status()
+
+    lines = response.text.splitlines()
+    text_lines = [
+        line for line in lines
+        if line
+        and not line.startswith(("WEBVTT", "Kind:", "Language:", "00:"))
+    ]
+
+    return " ".join(text_lines)
+
+
 # ---------------- Core Logic ----------------
 def build_rag_chain(youtube_url: str):
     """
-    Builds and returns a RAG chain for a given YouTube URL.
-    Responsibilities:
-    - Normalize input (URL → video_id)
-    - Fetch transcript
-    - Create embeddings + vector store
-    - Build LangChain pipeline
+    Input: YouTube URL
+    Output: Runnable RAG chain
     """
 
-    # 🔐 API key (checked at runtime, not import-time)
+    # 🔐 API key
     api_key = os.getenv("GOOGLE_API_KEY")
     if not api_key:
         raise RuntimeError("GOOGLE_API_KEY not set")
 
-    # 1️⃣ Normalize input
+    # 1️⃣ Normalize URL → video_id
     video_id = extract_video_id(youtube_url)
     if not video_id:
         raise ValueError("Could not extract video ID from URL")
 
-    # 2️⃣ Fetch transcript
-    transcript_data = YouTubeTranscriptApi().fetch(video_id, languages=["en"])
-    transcript = " ".join(chunk["text"] for chunk in transcript_data.to_raw_data())
+    # 2️⃣ Transcript (yt-dlp, cloud-safe)
+    transcript = get_transcript_with_ytdlp(video_id)
 
     # 3️⃣ Split text
     splitter = RecursiveCharacterTextSplitter(
