@@ -14,6 +14,37 @@ from langchain_core.runnables import RunnableParallel, RunnablePassthrough, Runn
 
 load_dotenv()
 
+# ---------------- GLOBAL CACHES (RAM OPTIMIZATION - CRITICAL) ----------------
+embeddings_cache = None
+llm_cache = None
+
+def get_embeddings():
+    """Global embedding cache - loads ONLY ONCE"""
+    global embeddings_cache
+    if embeddings_cache is None:
+        print("Loading embeddings model (one-time)...")
+        embeddings_cache = HuggingFaceEmbeddings(
+            model_name="all-MiniLM-L6-v2",
+            model_kwargs={"device": "cpu"}
+        )
+        print("Embeddings loaded!")
+    return embeddings_cache
+
+def get_llm():
+    """Global LLM cache - loads ONLY ONCE"""
+    global llm_cache
+    if llm_cache is None:
+        api_key = os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            raise RuntimeError("GOOGLE_API_KEY not set")
+        print("Initializing LLM (one-time)...")
+        llm_cache = ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash-exp",  # Lighter model
+            temperature=0.7,
+            api_key=api_key
+        )
+        print("LLM ready!")
+    return llm_cache
 
 # ---------------- Utility ----------------
 def extract_video_id(youtube_url: str) -> str:
@@ -29,60 +60,62 @@ def extract_video_id(youtube_url: str) -> str:
 
     raise ValueError("Invalid YouTube URL")
 
-
 def format_docs(docs):
     return "\n\n".join(doc.page_content for doc in docs)
 
-
-# ---------------- Transcript via yt-dlp ----------------
+# ---------------- Transcript via yt-dlp (Cloud-safe) ----------------
 def get_transcript_with_ytdlp(video_id: str) -> str:
     ydl_opts = {
         "skip_download": True,
         "writesubtitles": True,
         "writeautomaticsub": True,
         "quiet": True,
+        "no_warnings": True,
     }
+    
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(
+                f"https://www.youtube.com/watch?v={video_id}",
+                download=False
+            )
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(
-            f"https://www.youtube.com/watch?v={video_id}",
-            download=False
-        )
+        # Try manual subs first, then auto-generated
+        subtitles = info.get("subtitles") or info.get("automatic_captions", {})
+        if not subtitles or "en" not in subtitles:
+            raise RuntimeError("No English subtitles available")
 
-    subtitles = info.get("subtitles") or info.get("automatic_captions")
-    if not subtitles or "en" not in subtitles:
-        raise RuntimeError("No English subtitles available")
+        subtitle_url = subtitles["en"][0]["url"]
+        response = requests.get(subtitle_url, timeout=30)
+        response.raise_for_status()
 
-    subtitle_url = subtitles["en"][0]["url"]
-    response = requests.get(subtitle_url)
-    response.raise_for_status()
+        lines = response.text.splitlines()
+        text_lines = [
+            line for line in lines
+            if line and not line.startswith(("WEBVTT", "Kind:", "Language:", "00:"))
+        ]
 
-    lines = response.text.splitlines()
-    text_lines = [
-        line for line in lines
-        if line
-        and not line.startswith(("WEBVTT", "Kind:", "Language:", "00:"))
-    ]
-
-    return " ".join(text_lines)
-
+        transcript = " ".join(text_lines)
+        print(f"Transcript length: {len(transcript)} chars")
+        return transcript
+        
+    except Exception as e:
+        raise RuntimeError(f"Transcript fetch failed: {str(e)}")
 
 # ---------------- Core Logic ----------------
 def build_rag_chain(youtube_url: str):
     """
     Input: YouTube URL
-    Output: Runnable RAG chain
+    Output: Runnable RAG chain (RAM optimized)
     """
-
-    # 🔐 API key
-    api_key = os.getenv("GOOGLE_API_KEY")
-    if not api_key:
-        raise RuntimeError("GOOGLE_API_KEY not set")
-
+    # 🔐 API key check (already done in get_llm)
+    
     # 1️⃣ Normalize URL → video_id
     video_id = extract_video_id(youtube_url)
     if not video_id:
         raise ValueError("Could not extract video ID from URL")
+
+    print(f"Processing video: {video_id}")
 
     # 2️⃣ Transcript (yt-dlp, cloud-safe)
     transcript = get_transcript_with_ytdlp(video_id)
@@ -93,28 +126,21 @@ def build_rag_chain(youtube_url: str):
         chunk_overlap=200
     )
     chunks = splitter.create_documents([transcript])
+    print(f"Created {len(chunks)} chunks")
 
-    # 4️⃣ Embeddings + Vector Store
-    embeddings = HuggingFaceEmbeddings(
-        model_name="all-MiniLM-L6-v2",
-        model_kwargs={"device": "cpu"}
-    )
-
+    # 4️⃣ Embeddings + Vector Store (GLOBAL CACHE)
+    embeddings = get_embeddings()  # RAM OPTIMIZED
     vectorstore = FAISS.from_documents(chunks, embeddings)
     retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
 
-    # 5️⃣ LLM
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash",
-        temperature=0.7,
-        api_key=api_key
-    )
+    # 5️⃣ LLM (GLOBAL CACHE)
+    llm = get_llm()  # RAM OPTIMIZED
 
     # 6️⃣ Prompt
     prompt = PromptTemplate(
         template="""
-Answer ONLY using the context below.
-If the answer is not present, say "I don't know".
+Answer ONLY using the context below. Be concise and insightful.
+If the answer is not present, say "Not found in video transcript".
 
 Context:
 {context}
@@ -126,9 +152,15 @@ Question:
     )
 
     # 7️⃣ Chain
-    chain = RunnableParallel({
-        "context": retriever | RunnableLambda(format_docs),
-        "question": RunnablePassthrough()
-    })
-
-    return chain | prompt | llm | StrOutputParser()
+    chain = (
+        RunnableParallel({
+            "context": retriever | RunnableLambda(format_docs),
+            "question": RunnablePassthrough()
+        })
+        | prompt
+        | llm
+        | StrOutputParser()
+    )
+    
+    print("RAG chain built successfully!")
+    return chain
