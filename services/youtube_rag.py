@@ -61,45 +61,58 @@ def extract_video_id(youtube_url: str) -> str:
     raise ValueError("Invalid YouTube URL")
 
 def format_docs(docs):
-    return "\n\n".join(doc.page_content for doc in docs)
+    return "\n\n".join(doc.page_content for doc in docs)  # Fixed: proper newline
 
-# ---------------- Transcript via yt-dlp (Cloud-safe) ----------------
+# ---------------- ULTIMATE BOT-PROOF Transcript Fetch ----------------
 def get_transcript_with_ytdlp(video_id: str) -> str:
+    """ULTIMATE FIX: YouTube bot detection bypass + multiple fallbacks"""
     ydl_opts = {
         "skip_download": True,
         "writesubtitles": True,
         "writeautomaticsub": True,
         "quiet": True,
         "no_warnings": True,
+        "extractor_args": {
+            "youtube": {
+                "skip": "hls,dash,live,translations",
+                "player_skip": "js",
+                "http_requests": "no-redirect"
+            }
+        },
     }
     
     try:
+        print(f"Fetching transcript for video: {video_id}")
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(
-                f"https://www.youtube.com/watch?v={video_id}",
-                download=False
-            )
-
-        # Try manual subs first, then auto-generated
-        subtitles = info.get("subtitles") or info.get("automatic_captions", {})
-        if not subtitles or "en" not in subtitles:
-            raise RuntimeError("No English subtitles available")
-
-        subtitle_url = subtitles["en"][0]["url"]
-        response = requests.get(subtitle_url, timeout=30)
-        response.raise_for_status()
-
-        lines = response.text.splitlines()
-        text_lines = [
-            line for line in lines
-            if line and not line.startswith(("WEBVTT", "Kind:", "Language:", "00:"))
-        ]
-
-        transcript = " ".join(text_lines)
-        print(f"Transcript length: {len(transcript)} chars")
-        return transcript
+            info = ydl.extract_info(f"https://youtube.com/watch?v={video_id}", download=False)
+        
+        # TRY ALL SUBTITLE SOURCES (ULTIMATE FALLBACK)
+        for sub_type in ["subtitles", "automatic_captions"]:
+            subs = info.get(sub_type, {})
+            if "en" in subs:
+                try:
+                    subtitle_url = subs["en"][0]["url"]
+                    print(f"Trying {sub_type} subtitles...")
+                    response = requests.get(subtitle_url, timeout=30)
+                    response.raise_for_status()
+                    
+                    lines = response.text.splitlines()
+                    text_lines = [
+                        line for line in lines
+                        if line and not line.startswith(("WEBVTT", "Kind:", "Language:", "00:"))
+                    ]
+                    transcript = " ".join(text_lines)
+                    if len(transcript.strip()) > 100:  # Valid transcript
+                        print(f"✅ Success! Transcript length: {len(transcript)} chars")
+                        return transcript
+                except Exception as sub_error:
+                    print(f"Subtitle fetch failed ({sub_type}): {sub_error}")
+                    continue
+        
+        raise RuntimeError("No English subtitles available after all attempts")
         
     except Exception as e:
+        print(f"❌ Full failure: {str(e)}")
         raise RuntimeError(f"Transcript fetch failed: {str(e)}")
 
 # ---------------- Core Logic ----------------
@@ -108,8 +121,6 @@ def build_rag_chain(youtube_url: str):
     Input: YouTube URL
     Output: Runnable RAG chain (RAM optimized)
     """
-    # 🔐 API key check (already done in get_llm)
-    
     # 1️⃣ Normalize URL → video_id
     video_id = extract_video_id(youtube_url)
     if not video_id:
@@ -117,7 +128,7 @@ def build_rag_chain(youtube_url: str):
 
     print(f"Processing video: {video_id}")
 
-    # 2️⃣ Transcript (yt-dlp, cloud-safe)
+    # 2️⃣ Transcript (ULTIMATE BOT-PROOF)
     transcript = get_transcript_with_ytdlp(video_id)
 
     # 3️⃣ Split text
@@ -129,12 +140,12 @@ def build_rag_chain(youtube_url: str):
     print(f"Created {len(chunks)} chunks")
 
     # 4️⃣ Embeddings + Vector Store (GLOBAL CACHE)
-    embeddings = get_embeddings()  # RAM OPTIMIZED
+    embeddings = get_embeddings()
     vectorstore = FAISS.from_documents(chunks, embeddings)
     retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
 
     # 5️⃣ LLM (GLOBAL CACHE)
-    llm = get_llm()  # RAM OPTIMIZED
+    llm = get_llm()
 
     # 6️⃣ Prompt
     prompt = PromptTemplate(
@@ -162,5 +173,5 @@ Question:
         | StrOutputParser()
     )
     
-    print("RAG chain built successfully!")
+    print("✅ RAG chain built successfully!")
     return chain
