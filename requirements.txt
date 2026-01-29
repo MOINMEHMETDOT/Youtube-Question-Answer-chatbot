@@ -6,6 +6,7 @@ langchain-google-genai
 langchain-huggingface
 faiss-cpu
 yt-dlp
+sentence-transformers
 python-dotenv
 requests
 pydantic
