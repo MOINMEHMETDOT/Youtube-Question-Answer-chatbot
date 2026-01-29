@@ -39,5 +39,18 @@ def ask(req: QuestionRequest):
         raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
 
 @app.get("/health")
+
+if __name__ == "__main__":
+    import os
+    port = int(os.environ.get("PORT", 10000))
+    import uvicorn
+    uvicorn.run(
+        "main:app", 
+        host="0.0.0.0", 
+        port=port,
+        log_level="info"
+    )
+
 def health():
     return {"status": "healthy", "video_loaded": rag_chain is not None}
+
