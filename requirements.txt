@@ -5,7 +5,7 @@ langchain-community==0.3.1
 langchain-google-genai==4.2.0
 langchain-huggingface==0.1.0
 faiss-cpu==1.13.2
-yt-dlp==2024.12.30
+yt-dlp==2025.1.15
 python-dotenv==1.0.1
 requests==2.32.3
 pydantic==2.9.2
